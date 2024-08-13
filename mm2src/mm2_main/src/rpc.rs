@@ -258,6 +258,16 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
         req_json: Json,
         client: SocketAddr,
     ) -> Result<Response<Vec<u8>>, String> {
+        if req.method() == Method::OPTIONS {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, rpc_cors.clone())
+                .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+                .header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                .body(Body::empty())
+                .unwrap();
+        }
+
         if req.method != Method::POST {
             return ERR!("Only POST requests are supported!");
         }
@@ -274,19 +284,21 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
 
     // Convert the native Hyper stream into a portable stream of `Bytes`.
     let (req, req_body) = req.into_parts();
-    let req_bytes = try_sf!(hyper::body::to_bytes(req_body).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
+    let req_bytes = try_sf!(hyper::body::to_bytes(req_body).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors.clone());
     let req_str = String::from_utf8_lossy(req_bytes.as_ref());
     let is_invalid_input = req_str.chars().any(|c| c == '<' || c == '>' || c == '&');
     if is_invalid_input {
         return Response::builder()
             .status(500)
             .header(CONTENT_TYPE, APPLICATION_JSON)
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, rpc_cors.clone())
             .body(Body::from(err_to_rpc_json_string("Invalid input")))
             .unwrap();
     }
-    let req_json: Json = try_sf!(json::from_slice(&req_bytes), ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
+    let req_json: Json = try_sf!(json::from_slice(&req_bytes), ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors.clone());
 
-    let res = try_sf!(process_rpc_request(ctx, req, req_json, client).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
+    let res =
+        try_sf!(process_rpc_request(ctx, req, req_json, client).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors.clone());
     let (mut parts, body) = res.into_parts();
     parts.headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, rpc_cors);
     let body_escaped = match std::str::from_utf8(&body) {
@@ -298,6 +310,7 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
             return Response::builder()
                 .status(500)
                 .header(CONTENT_TYPE, APPLICATION_JSON)
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, )
                 .body(Body::from(err_to_rpc_json_string("Non UTF-8 output")))
                 .unwrap();
         },
@@ -542,4 +555,30 @@ pub fn spawn_rpc(ctx_h: u32) {
         fmt = ">>>>>>>>>> DEX stats API enabled at unixtime.{}  <<<<<<<<<",
         common::now_ms() / 1000
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::block_on;
+    use hyper::{Body, Request};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_rpc_service_options_request() {
+        let ctx_h = 0; // Replace with a valid context handle in actual tests
+        let client: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("http://localhost:3000")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = block_on(rpc_service(req, ctx_h, client));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Access-Control-Allow-Methods").unwrap(),
+            "POST, OPTIONS"
+        );
+    }
 }
