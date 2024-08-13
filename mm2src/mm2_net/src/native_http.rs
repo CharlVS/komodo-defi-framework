@@ -122,9 +122,6 @@ pub trait SlurpHttpClient {
         self.slurp_req(request).await
     }
 
-    /// Executes an OPTIONS request, returning the response status, headers, and body.
-    async fn slurp_options_request(&self, url: &str, headers: Vec<(&'static str, &'static str)>) -> SlurpResult;
-
     /// Executes a GET request, returning the response status, headers and body.
     async fn slurp_url(&self, url: &str) -> SlurpResult {
         let req = Request::builder().uri(url).body(Vec::new())?;
@@ -189,21 +186,6 @@ where
     C: Connect + Clone + Send + Sync + 'static,
 {
     fn request(&self, req: Request<Body>) -> ResponseFuture { Client::<C>::request(self, req) }
-
-    async fn slurp_options_request(&self, url: &str, headers: Vec<(&'static str, &'static str)>) -> SlurpResult {
-        let mut req = Request::builder().method("OPTIONS").uri(url);
-
-        let h = req
-            .headers_mut()
-            .or_mm_err(|| SlurpError::Internal("An error occurred when accessing the request headers".to_string()))?;
-
-        for (key, value) in headers {
-            h.insert(key, HeaderValue::from_static(value));
-        }
-
-        let req = req.body(Body::empty())?;
-        self.slurp_req(req).await
-    }
 }
 
 /// Executes a Hyper request, returning the response status, headers and body.
@@ -283,15 +265,4 @@ mod tests {
         let (status, headers, body) = block_on(slurp_url("https://httpbin.org/get")).unwrap();
         assert!(status.is_success(), "{:?} {:?} {:?}", status, headers, body);
     }
-}
-
-#[test]
-fn test_slurp_options_request() {
-    let headers = vec![
-        ("Access-Control-Request-Method", "POST"),
-        ("Origin", "https://app.komodoplatform.com"),
-    ];
-
-    let (status, headers, body) = block_on(slurp_options_request("https://httpbin.org/options", headers)).unwrap();
-    assert!(status.is_success(), "{:?} {:?} {:?}", status, headers, body);
 }
