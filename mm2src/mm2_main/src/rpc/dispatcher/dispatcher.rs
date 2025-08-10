@@ -67,7 +67,7 @@ use coins::{
     set_swap_transaction_fee_policy, sign_message, sign_raw_transaction, validators_info, verify_message, withdraw,
 };
 use coins_activation::{
-    cancel_init_l2, cancel_init_platform_coin_with_tokens, cancel_init_standalone_coin, cancel_init_token,
+    cancel_init_l2, cancel_init_platform_coin_with_tokens, cancel_init_standalone_coin, cancel_init_token, init_enable_coin_unified,
     enable_platform_coin_with_tokens, enable_token, init_l2, init_l2_status, init_l2_user_action,
     init_platform_coin_with_tokens, init_platform_coin_with_tokens_status, init_platform_coin_with_tokens_user_action,
     init_standalone_coin, init_standalone_coin_status, init_standalone_coin_user_action, init_token, init_token_status,
@@ -330,7 +330,8 @@ async fn rpc_task_dispatcher(
         "enable_erc20::cancel" => handle_mmrpc(ctx, request, cancel_init_token::<EthCoin>).await,
         "enable_erc20::init" => handle_mmrpc(ctx, request, init_token::<EthCoin>).await,
         "enable_erc20::status" => handle_mmrpc(ctx, request, init_token_status::<EthCoin>).await,
-        "enable_erc20::user_action" => handle_mmrpc(ctx, request, init_token_user_action::<EthCoin>).await,
+                "enable_erc20::user_action" => handle_mmrpc(ctx, request, init_token_user_action::<EthCoin>).await,
+        "enable_coin::init" => handle_mmrpc(ctx, request, coins_activation::init_enable_coin_unified).await,
         "enable_tendermint::cancel" => {
             handle_mmrpc(ctx, request, cancel_init_platform_coin_with_tokens::<TendermintCoin>).await
         },
@@ -345,7 +346,7 @@ async fn rpc_task_dispatcher(
                 init_platform_coin_with_tokens_user_action::<TendermintCoin>,
             )
             .await
-        },
+        }
         // // TODO: tendermint tokens
         // "enable_tendermint_token::cancel" => handle_mmrpc(ctx, request, cancel_init_token::<TendermintToken>).await,
         // "enable_tendermint_token::init" => handle_mmrpc(ctx, request, init_token::<TendermintToken>).await,
