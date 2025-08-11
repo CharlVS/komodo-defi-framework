@@ -37,4 +37,4 @@ pub use standalone_coin::{
     init_standalone_coin_status,
     init_standalone_coin_user_action,
 };
-pub use unified_enable::init_enable_coin_unified;
+pub use unified_enable::{init_enable_coin_unified, enable_coin_unified_status, cancel_enable_coin_unified};

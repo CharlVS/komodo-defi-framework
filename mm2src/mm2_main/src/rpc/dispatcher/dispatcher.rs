@@ -332,6 +332,8 @@ async fn rpc_task_dispatcher(
         "enable_erc20::status" => handle_mmrpc(ctx, request, init_token_status::<EthCoin>).await,
                 "enable_erc20::user_action" => handle_mmrpc(ctx, request, init_token_user_action::<EthCoin>).await,
         "enable_coin::init" => handle_mmrpc(ctx, request, coins_activation::init_enable_coin_unified).await,
+        "enable_coin::status" => handle_mmrpc(ctx, request, coins_activation::enable_coin_unified_status).await,
+        "enable_coin::cancel" => handle_mmrpc(ctx, request, coins_activation::cancel_enable_coin_unified).await,
         "enable_tendermint::cancel" => {
             handle_mmrpc(ctx, request, cancel_init_platform_coin_with_tokens::<TendermintCoin>).await
         },

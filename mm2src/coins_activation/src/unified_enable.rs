@@ -1,7 +1,7 @@
 use crate::platform_coin_with_tokens::{init_platform_coin_with_tokens, EnablePlatformCoinWithTokensReq};
 use crate::standalone_coin::init_standalone_coin::{init_standalone_coin, InitStandaloneCoinReq};
 use crate::{init_erc20_token_activation::InitErc20TokenActivationRequest, init_token::init_token};
-use coins::eth::v2_activation::{EthActivationV2Request, EthNode};
+use coins::eth::v2_activation::{Erc20TokenActivationRequest, EthActivationV2Request, EthNode};
 use coins::eth::EthCoin;
 use coins::lp_coins::CoinProtocol;
 use coins::tendermint::{RpcNode, TendermintCoin};
@@ -10,9 +10,12 @@ use coins::utxo::rpc_clients::electrum_rpc::connection::ElectrumConnectionSettin
 use coins::utxo::utxo_standard::UtxoStandardCoin;
 use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
 use coins::z_coin::ZCoin;
+use coins::{lp_coinfind_any, lp_coinfind_or_err};
+use common::SuccessResponse;
 use ethereum_types::Address;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use rpc_task::rpc_common::{CancelRpcTaskRequest, RpcTaskStatusRequest};
 use rpc_task::rpc_common::InitRpcTaskResponse;
 use rpc_task::RpcInitReq;
 use serde::Deserialize;
@@ -49,6 +52,24 @@ pub enum EnableCoinUnifiedError {
     Erc20InitError(String),
     #[display(fmt = "Tendermint init error: {_0}")]
     TendermintInitError(String),
+}
+
+#[derive(Clone, Serialize, SerializeErrorType, Display)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum EnableCoinUnifiedStatusError {
+    #[display(fmt = "No such task: {_0}")]
+    NoSuchTask(u64),
+    #[display(fmt = "Internal error: {_0}")]
+    Internal(String),
+}
+
+#[derive(Clone, Serialize, SerializeErrorType, Display)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum CancelEnableCoinUnifiedError {
+    #[display(fmt = "No such task: {_0}")]
+    NoSuchTask(u64),
+    #[display(fmt = "Internal error: {_0}")]
+    Internal(String),
 }
 
 impl HttpStatusCode for EnableCoinUnifiedError {
@@ -230,18 +251,60 @@ pub async fn init_enable_coin_unified(
                 .await
                 .map_err(|e| MmError::new(EnableCoinUnifiedError::EthInitError(e.to_string())))
         },
-        CoinProtocol::ERC20 { .. } => {
-            // ERC20 token only, defaults are sufficient for the request
-            let params = InitErc20TokenActivationRequest {
-                required_confirmations: conf.get("required_confirmations").and_then(|v| v.as_u64()),
-                enable_params: Default::default(),
-                path_to_address: Default::default(),
-            };
-            let init_req = crate::init_token::InitTokenReq { ticker, protocol: None, activation_params: params };
+        CoinProtocol::TRX { .. } => {
+            // TRX uses the same activation machinery as ETH (ChainSpec::Tron)
+            let params = default_eth_request_from_conf(&conf)
+                .ok_or_else(|| MmError::new(EnableCoinUnifiedError::MissingActivationParams(
+                    "Missing 'nodes' and/or 'swap_contract_address' in coin config".to_string(),
+                )))?;
+            let init_req = EnablePlatformCoinWithTokensReq { ticker, request: params };
             let rpc_req = RpcInitReq { client_id, inner: init_req };
-            init_token::<EthCoin>(ctx, rpc_req)
+            init_platform_coin_with_tokens::<EthCoin>(ctx, rpc_req)
                 .await
-                .map_err(|e| MmError::new(EnableCoinUnifiedError::Erc20InitError(e.to_string())))
+                .map_err(|e| MmError::new(EnableCoinUnifiedError::EthInitError(e.to_string())))
+        },
+        CoinProtocol::ERC20 { ref platform, .. } => {
+            // If platform coin is active and available -> enable token only; otherwise enable platform with this token
+            let platform_active = match lp_coinfind_any(&ctx, platform).await {
+                Ok(Some(coin)) => coin.is_available(),
+                _ => false,
+            };
+
+            if platform_active {
+                // Token-only activation
+                let params = InitErc20TokenActivationRequest {
+                    required_confirmations: conf.get("required_confirmations").and_then(|v| v.as_u64()),
+                    enable_params: Default::default(),
+                    path_to_address: Default::default(),
+                };
+                let init_req = crate::init_token::InitTokenReq { ticker, protocol: None, activation_params: params };
+                let rpc_req = RpcInitReq { client_id, inner: init_req };
+                init_token::<EthCoin>(ctx, rpc_req)
+                    .await
+                    .map_err(|e| MmError::new(EnableCoinUnifiedError::Erc20InitError(e.to_string())))
+            } else {
+                // Platform-with-tokens activation with a single requested token
+                let mut platform_req = default_eth_request_from_conf(&conf)
+                    .ok_or_else(|| MmError::new(EnableCoinUnifiedError::MissingActivationParams(
+                        "Missing 'nodes' and/or 'swap_contract_address' in coin config".to_string(),
+                    )))?;
+                let token_req = crate::platform_coin_with_tokens::TokenActivationRequest::<Erc20TokenActivationRequest> {
+                    ticker: ticker.clone(),
+                    protocol: None,
+                    request: Erc20TokenActivationRequest { required_confirmations: conf.get("required_confirmations").and_then(|v| v.as_u64()) },
+                };
+                let eth_with_tokens = crate::eth_with_token_activation::EthWithTokensActivationRequest {
+                    platform_request: platform_req,
+                    erc20_tokens_requests: vec![token_req],
+                    get_balances: true,
+                    nft_req: None,
+                };
+                let init_req = EnablePlatformCoinWithTokensReq { ticker: platform.clone(), request: eth_with_tokens };
+                let rpc_req = RpcInitReq { client_id, inner: init_req };
+                init_platform_coin_with_tokens::<EthCoin>(ctx, rpc_req)
+                    .await
+                    .map_err(|e| MmError::new(EnableCoinUnifiedError::EthInitError(e.to_string())))
+            }
         },
         CoinProtocol::TENDERMINT { .. } => {
             let params = default_tendermint_request_from_conf(&conf)
@@ -254,11 +317,120 @@ pub async fn init_enable_coin_unified(
                 .await
                 .map_err(|e| MmError::new(EnableCoinUnifiedError::TendermintInitError(e.to_string())))
         },
-        CoinProtocol::TENDERMINTTOKEN { .. } => {
-            // Not yet supported as a standalone init; must be activated via platform coin request
-            MmError::err(EnableCoinUnifiedError::UnsupportedProtocol { ticker })
+        CoinProtocol::TENDERMINTTOKEN { ref platform, .. } => {
+            // If platform is not active, activate platform with this token; if active, currently not supported as token-only.
+            let platform_active = match lp_coinfind_any(&ctx, platform).await {
+                Ok(Some(coin)) => coin.is_available(),
+                _ => false,
+            };
+            if platform_active {
+                return MmError::err(EnableCoinUnifiedError::UnsupportedProtocol { ticker });
+            }
+            // Build minimal platform-with-tokens request including this token by ticker; protocol info from config
+            let params = default_tendermint_request_from_conf(&conf)
+                .ok_or_else(|| MmError::new(EnableCoinUnifiedError::MissingActivationParams(
+                    "Missing 'nodes' in coin config".to_string(),
+                )))?;
+            // Append the token by ticker
+            let mut params = params;
+            params.tokens_params.push(crate::platform_coin_with_tokens::TokenActivationRequest::<crate::tendermint_with_assets_activation::TendermintTokenActivationParams> {
+                ticker: ticker.clone(),
+                protocol: None,
+                request: crate::tendermint_with_assets_activation::TendermintTokenActivationParams {},
+            });
+            // The platform ticker is provided by `platform` field of protocol
+            let init_req = EnablePlatformCoinWithTokensReq { ticker: platform.clone(), request: params };
+            let rpc_req = RpcInitReq { client_id, inner: init_req };
+            init_platform_coin_with_tokens::<TendermintCoin>(ctx, rpc_req)
+                .await
+                .map_err(|e| MmError::new(EnableCoinUnifiedError::TendermintInitError(e.to_string())))
         },
-        // Other protocols are not supported via unified init for now.
         _ => MmError::err(EnableCoinUnifiedError::UnsupportedProtocol { ticker }),
     }
+}
+
+pub async fn enable_coin_unified_status(
+    ctx: MmArc,
+    req: RpcTaskStatusRequest,
+) -> MmResult<Json, EnableCoinUnifiedStatusError> {
+    use rpc_task::RpcTaskStatus;
+    let coins_act_ctx = crate::context::CoinsActivationContext::from_ctx(&ctx)
+        .map_to_mm(|e| EnableCoinUnifiedStatusError::Internal(e))?;
+
+    // Helper: try status on a manager and return Option<Json>
+    async fn try_manager_status<Task, E>(
+        manager: &rpc_task::RpcTaskManagerShared<Task>,
+        req: &RpcTaskStatusRequest,
+    ) -> Option<Result<Json, String>>
+    where
+        Task: rpc_task::RpcTask + Send + Sync + 'static,
+        <Task as rpc_task::RpcTaskTypes>::Error: mm2_err_handle::SerMmErrorType + Clone,
+        <Task as rpc_task::RpcTaskTypes>::Item: serde::Serialize + Clone,
+        <Task as rpc_task::RpcTaskTypes>::InProgressStatus: serde::Serialize + Clone,
+        <Task as rpc_task::RpcTaskTypes>::AwaitingStatus: serde::Serialize + Clone,
+    {
+        let guard = manager.lock().ok()?;
+        match guard.task_status(req.task_id, req.forget_if_finished) {
+            Ok(status) => Some(serde_json::to_value(status.map_err(|e| e)).map_err(|e| e.to_string())),
+            Err(rpc_task::RpcTaskError::NoSuchTask(_)) => None,
+            Err(other) => Some(Err(other.to_string())),
+        }
+    }
+
+    macro_rules! try_status {
+        ($mgr:expr) => {{
+            if let Some(res) = try_manager_status(&$mgr, &req).await { return res.map_err(|e| MmError::new(EnableCoinUnifiedStatusError::Internal(e))); }
+        }};
+    }
+
+    try_status!(coins_act_ctx.init_utxo_standard_task_manager);
+    try_status!(coins_act_ctx.init_bch_task_manager);
+    try_status!(coins_act_ctx.init_qtum_task_manager);
+    try_status!(coins_act_ctx.init_z_coin_task_manager);
+    try_status!(coins_act_ctx.init_eth_task_manager);
+    try_status!(coins_act_ctx.init_erc20_token_task_manager);
+    try_status!(coins_act_ctx.init_tendermint_coin_task_manager);
+    #[cfg(not(target_arch = "wasm32"))]
+    try_status!(coins_act_ctx.init_lightning_task_manager);
+
+    MmError::err(EnableCoinUnifiedStatusError::NoSuchTask(req.task_id))
+}
+
+pub async fn cancel_enable_coin_unified(
+    ctx: MmArc,
+    req: CancelRpcTaskRequest,
+) -> MmResult<SuccessResponse, CancelEnableCoinUnifiedError> {
+    let coins_act_ctx = crate::context::CoinsActivationContext::from_ctx(&ctx)
+        .map_to_mm(|e| CancelEnableCoinUnifiedError::Internal(e))?;
+
+    // Helper: try cancel on a manager
+    fn try_manager_cancel<Task>(manager: &rpc_task::RpcTaskManagerShared<Task>, task_id: u64) -> Option<Result<(), String>>
+    where
+        Task: rpc_task::RpcTask + Send + Sync + 'static,
+    {
+        let guard = manager.lock().ok()?;
+        match guard.cancel_task(task_id) {
+            Ok(_) => Some(Ok(())),
+            Err(rpc_task::RpcTaskError::NoSuchTask(_)) => None,
+            Err(other) => Some(Err(other.to_string())),
+        }
+    }
+
+    macro_rules! try_cancel {
+        ($mgr:expr) => {{
+            if let Some(res) = try_manager_cancel(&$mgr, req.task_id) { return res.map(|_| SuccessResponse::new()).map_err(|e| MmError::new(CancelEnableCoinUnifiedError::Internal(e))); }
+        }};
+    }
+
+    try_cancel!(coins_act_ctx.init_utxo_standard_task_manager);
+    try_cancel!(coins_act_ctx.init_bch_task_manager);
+    try_cancel!(coins_act_ctx.init_qtum_task_manager);
+    try_cancel!(coins_act_ctx.init_z_coin_task_manager);
+    try_cancel!(coins_act_ctx.init_eth_task_manager);
+    try_cancel!(coins_act_ctx.init_erc20_token_task_manager);
+    try_cancel!(coins_act_ctx.init_tendermint_coin_task_manager);
+    #[cfg(not(target_arch = "wasm32"))]
+    try_cancel!(coins_act_ctx.init_lightning_task_manager);
+
+    MmError::err(CancelEnableCoinUnifiedError::NoSuchTask(req.task_id))
 }
